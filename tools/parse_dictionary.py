@@ -28,6 +28,32 @@ UUID_RE = re.compile(
 )
 HEADER_FIRST_CELL = "key"
 
+# The V6.0 PDF stores UTF-8 text that was decoded as cp1252 somewhere upstream
+# ("fÃ¼r", "20Â°C"). A run of a lead byte (Â..ô) followed by cp1252-rendered
+# continuation bytes is re-encoded and decoded as UTF-8; runs that do not form
+# valid UTF-8 are left untouched.
+_CP1252_CONT = (
+    "\u0080-\u00bf\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u0192"
+    "\u02c6\u02dc\u2013\u2014\u2018-\u201e\u2020-\u2022\u2026\u2030"
+    "\u2039\u203a\u20ac\u2122"
+)
+_MOJIBAKE_RE = re.compile(f"[\u00c2-\u00f4][{_CP1252_CONT}]+")
+# Some continuation bytes (cp1252 has no glyph for 0x81/0x8d/0x8f/0x90/0x9d,
+# and C1 controls were dropped) are missing entirely, leaving a bare "Ã".
+# Mid-word it can only be "ß"; word-initial it is Ä/Ö/Ü, told apart by the
+# German words that actually occur in the dictionary.
+_BARE_A_TILDE_MIDWORD_RE = re.compile(r"(?<=[A-Za-zäöüÄÖÜß])Ã")
+_BARE_A_TILDE_INITIAL = (("Ãber", "Über"), ("Ãff", "Öff"), ("Ãnder", "Änder"))
+# A bare "Â" is a non-breaking space whose 0xA0 byte became a plain space.
+_BARE_A_CIRC_RE = re.compile(r"Â(?=\s)")
+# The PDF already carries U+FFFD where a degree sign was ("20�C", "(�F)").
+_LOST_DEGREE_RE = re.compile(r"(?<=[\d(\s])\ufffd(?=[CF]\b)")
+# Rich-text-editor markup leaked into some descriptions. Only real HTML tags
+# are stripped; "<departureDate>" examples or "a < b > c" prose stay intact.
+# PDF line wrapping can split a tag name ("<spa n style=...>").
+_HTML_TAGS = {"p", "span", "div", "br", "b", "i", "u", "em", "strong", "ul", "ol", "li", "a", "font"}
+_HTML_TAG_RE = re.compile(r"</?\s*([a-z](?:\s?[a-z])*)(?=[\s/>])[^<>]*>", re.I)
+
 
 def _clean_key(cell: str | None) -> str:
     """UUIDs may wrap across lines; remove all whitespace."""
@@ -45,18 +71,51 @@ def _clean_name(cell: str | None) -> str:
     """
     if not cell:
         return ""
-    lines = [ln.strip() for ln in cell.split("\n") if ln.strip()]
+    lines = [ln.strip() for ln in _repair_encoding(cell).split("\n") if ln.strip()]
     sep = " " if any(" " in ln for ln in lines) else ""
     name = sep.join(lines)
     return re.sub(r"\s+", " ", name).strip()
 
 
+def _repair_mojibake_run(match: re.Match[str]) -> str:
+    run = match.group(0)
+    try:
+        return run.encode("cp1252").decode("utf-8")
+    except UnicodeError:
+        try:
+            return run.encode("latin-1").decode("utf-8")
+        except UnicodeError:
+            return run
+
+
+def _repair_encoding(text: str) -> str:
+    """Undo UTF-8-read-as-cp1252 double encoding (see _MOJIBAKE_RE)."""
+    text = _MOJIBAKE_RE.sub(_repair_mojibake_run, text)
+    text = _BARE_A_TILDE_MIDWORD_RE.sub("ß", text)
+    for broken, fixed in _BARE_A_TILDE_INITIAL:
+        text = text.replace(broken, fixed)
+    text = _BARE_A_CIRC_RE.sub("", text)
+    text = _LOST_DEGREE_RE.sub("°", text)
+    # "â" left over from an en dash whose trailing bytes were dropped.
+    return text.replace(" â ", " – ")
+
+
+def _strip_html_tag(match: re.Match[str]) -> str:
+    name = re.sub(r"\s", "", match.group(1)).lower()
+    return " " if name in _HTML_TAGS else match.group(0)
+
+
 def _clean_text(cell: str | None) -> str:
-    """Collapse wrapped multi-line text (descriptions) into one line."""
+    """Collapse wrapped multi-line text (descriptions) into one line.
+
+    Some descriptions are raw rich-text-editor HTML; tags are stripped so only
+    the visible text remains.
+    """
     if not cell:
         return ""
-    text = re.sub(r"\s+", " ", cell.replace("\n", " "))
-    return html.unescape(text).strip()
+    text = html.unescape(_HTML_TAG_RE.sub(_strip_html_tag, cell.replace("\n", " ")))
+    text = _repair_encoding(text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _clean_token(cell: str | None) -> str:

@@ -132,12 +132,22 @@ logger:
 ## Updating the data dictionary
 
 `custom_components/vw_eu_data_act/data_dictionary.json` is generated from the
-official PDF and committed to the repo. To regenerate from a newer PDF:
+official PDF and committed to the repo. The current source is
+`20260724_DataDictionary_Long Version_V6.0_Continuous_Data.pdf` (V6.0), published on the
+[EU Data Act portal](https://eu-data-act.drivesomethinggreater.com/content/dam/common/documents/logged-data-dictionary/20260724_DataDictionary_Long%20Version_V6.0_Continuous_Data.pdf).
+
+To regenerate, replace the PDF in the repo root with the newer version and run:
 
 ```bash
 python -m venv .venv && .venv/bin/pip install pdfplumber
 .venv/bin/python tools/parse_dictionary.py path/to/DataDictionary.pdf
 ```
+
+Without arguments the script picks the first `*DataDictionary*.pdf` in the repo
+root. It also repairs text quirks found in the source PDF: double-encoded UTF-8
+(`fÃ¼r` → `für`, `Â°C` → `°C`), umlauts whose second byte was dropped, and raw
+HTML markup in descriptions. Characters the PDF itself replaced with `�` cannot
+be recovered and are kept as-is. Run `python tests/test_offline.py` afterwards.
 
 ## License
 
